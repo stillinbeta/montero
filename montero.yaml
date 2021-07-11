@@ -1,0 +1,133 @@
+---
+- name: provision the nas
+  hosts: nas
+  become: true
+  remote_user: ellie
+  tasks:
+  - name: configure mounts
+    block:
+    - group:
+        name: media-users
+      register: media_group
+    - file:
+        name: /media/ssd-cache
+        state: directory
+    - ansible.posix.mount:
+        path: /media/ssd-cache
+        src: UUID=30C3-40FE
+        state: mounted
+        fstype: vfat
+    - file:
+        name: /media/media
+        state: directory
+      register: media
+    - ansible.posix.mount:
+        path: "{{ media.path }}"
+        src: UUID=ED0D-F950
+        opts: "gid={{ media_group.gid }},umask=002"
+        state: mounted
+        fstype: vfat
+  - name: setup users
+    block:
+    - user:
+        name: ellie
+        append: yes
+        groups: media-users
+    - user:
+        name: lydia
+        home: "{{ media.path }}"
+        append: yes
+        groups: media-users
+
+  - name: enable plex
+    block:
+    - apt_key:
+        url: 'https://downloads.plex.tv/plex-keys/PlexSign.key'
+        state: present
+    - apt_repository: 
+        repo: 'deb https://downloads.plex.tv/repo/deb public main'
+        state: present
+    - apt:
+        name: plexmediaserver
+        state: present
+
+- name: 'configure SAMBA'
+  hosts: nas
+  roles:
+  - bertvv.samba
+  become: true
+  vars:
+    samba_load_printers: false
+    samba_users:
+    - name: ellie
+      password: oldtownroad
+    samba_shares:
+    - name: media
+      comment: "Media on Montero"
+      path: /media/media
+      group: media-users
+      write_list: '@media-users'
+      browsable: 'yes'
+
+- name: "set up VFTPD"
+  hosts: "nas"
+  become: true
+  tasks:
+  - name: generate CA
+    block:
+    - file:
+        name: /etc/ssl/ca
+        state: directory
+    - file:
+        name: /etc/ssl/csr
+        state: directory
+    - community.crypto.openssl_privatekey:
+        path: /etc/ssl/ca/ca-private.pem
+      register: ca_key
+    - community.crypto.openssl_csr:
+        path: /etc/ssl/csr/home.stillinbeta.com.csr
+        privatekey_path: "{{ ca_key.filename }}"
+        commonName: 'call-me-by-your-ca'
+      register: ca_csr
+    - community.crypto.x509_certificate:
+        path: /etc/ssl/ca/ca-public.crt
+        privatekey_path: "{{ ca_key.filename }}"
+        csr_path: "{{ ca_csr.filename }}"
+        provider: selfsigned
+      register: ca_cert
+  - name: 'Sign a key'
+    block:
+    - community.crypto.openssl_privatekey:
+        path: /etc/ssl/private/home.stillinbeta.com.pem
+      register: vsftpd_key
+    - community.crypto.openssl_csr:
+        path: /etc/ssl/csr/home.stillinbeta.com.csr
+        privatekey_path: "{{ vsftpd_key.filename }}"
+        commonName: home.stillinbeta.com
+      register: vsftpd_csr
+    - community.crypto.x509_certificate:
+        path: /etc/ssl/certs/home.stillinbeta.com.crt
+        privatekey_path: "{{ vsftpd_key.filename }}"
+        csr_path: "{{ vsftpd_csr.filename }}"
+        provider: ownca
+        ownca_path: "{{ ca_cert.filename }}"
+        ownca_privatekey_path: "{{ ca_key.filename }}"
+      register: vsftpd_cert
+  - name: 'install vsftpd'
+    block:
+    - apt:
+        name: vsftpd
+        state: present
+    - template:
+        src: vsftpd.conf.j2
+        dest: '/etc/vsftpd.conf'
+        owner: root
+        group: root
+        mode: u=rw,g=r,o=r
+      register: vsftpdconf
+    - service:
+        name: vsftpd
+        state: restarted
+      when: vsftpdconf.changed
+
+

@@ -1,0 +1,7 @@
+---
+roles:
+- src: weareinteractive.vsftpd
+- src: bertvv.samba
+collections:
+- name: ansible.posix
+- name: community.crypto
